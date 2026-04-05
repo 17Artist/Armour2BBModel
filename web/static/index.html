@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Armour2BBModel</title>
+<style>
+:root{--bg:#0e1117;--surface:#161b22;--surface2:#1c2333;--border:#2a3140;--text:#c9d1d9;--text2:#6b7688;--accent:#3b82f6;--accent-dim:rgba(59,130,246,.12);--success:#22c55e;--error:#ef4444}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Microsoft YaHei',sans-serif;background:var(--bg);color:var(--text);min-height:100vh;display:flex;align-items:center;justify-content:center}
+.card{width:min(480px,92vw);background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:2.5rem 2rem 2rem;position:relative;overflow:hidden}
+.card::before{content:'';position:absolute;top:0;left:0;right:0;height:3px;background:linear-gradient(90deg,var(--accent),#818cf8)}
+.head{text-align:center;margin-bottom:1.8rem}
+.head h1{font-size:1.35rem;font-weight:600;letter-spacing:-.02em;margin-bottom:.35rem}
+.head h1 span{color:var(--accent)}
+.head p{font-size:.8rem;color:var(--text2)}
+.drop{border:1.5px dashed var(--border);border-radius:12px;padding:2.2rem 1.5rem;text-align:center;cursor:pointer;transition:all .2s;background:var(--bg)}
+.drop:hover,.drop.over{border-color:var(--accent);background:var(--accent-dim)}
+.drop.disabled{opacity:.5;pointer-events:none}
+.drop-icon{width:40px;height:40px;margin:0 auto .8rem;border-radius:10px;background:var(--accent-dim);display:flex;align-items:center;justify-content:center}
+.drop-icon svg{width:20px;height:20px;stroke:var(--accent);fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.drop p{font-size:.9rem;margin-bottom:.25rem}
+.drop small{font-size:.75rem;color:var(--text2)}
+input[type=file]{display:none}
+.status{margin-top:1rem;min-height:1.6rem;font-size:.82rem;text-align:center;transition:color .2s}
+.status.ok{color:var(--success)}
+.status.err{color:var(--error)}
+.status.loading{color:var(--accent)}
+.note{margin-top:1.4rem;padding:.8rem 1rem;background:var(--bg);border-radius:8px;font-size:.75rem;color:var(--text2);line-height:1.6}
+.note code{color:var(--accent);font-size:.72rem}
+.foot{text-align:center;margin-top:1.2rem;font-size:.7rem;color:var(--text2)}
+.foot a{color:var(--text2);text-decoration:none;transition:color .15s}
+.foot a:hover{color:var(--accent)}
+.badge{display:inline-block;font-size:.65rem;padding:.15rem .4rem;border-radius:4px;background:var(--accent-dim);color:var(--accent);margin-left:.3rem;vertical-align:middle}
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="head">
+    <h1>Armour<span>2</span>BBModel <span class="badge">WASM</span></h1>
+    <p>时装工坊皮肤 &rarr; Blockbench 模型（浏览器本地转换）</p>
+  </div>
+
+  <div class="drop disabled" id="drop">
+    <div class="drop-icon">
+      <svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+    </div>
+    <p id="dropText">正在加载...</p>
+    <small>WASM 首次加载可能需要几秒</small>
+  </div>
+  <input type="file" id="file" accept=".armour,.awsk">
+
+  <div class="status" id="st"></div>
+
+  <div class="note">
+    所有转换在浏览器本地完成，文件不会上传到服务器。<br>
+    许可证 <code>CC-BY-NC-SA-3.0</code>
+  </div>
+
+  <div class="foot">
+    <a href="https://github.com/17Artist/Armour2BBModel" target="_blank">GitHub</a>
+  </div>
+</div>
+
+<script src="wasm_exec.js"></script>
+<script>
+const drop=document.getElementById('drop'),file=document.getElementById('file'),
+      st=document.getElementById('st'),dropText=document.getElementById('dropText');
+
+let wasmReady=false;
+
+async function loadWasm(){
+  st.className='status loading';
+  st.textContent='加载中...';
+  try{
+    const go=new Go();
+    let result;
+    if(WebAssembly.instantiateStreaming){
+      result=await WebAssembly.instantiateStreaming(fetch('convert.wasm'),go.importObject);
+    }else{
+      const resp=await fetch('convert.wasm');
+      const bytes=await resp.arrayBuffer();
+      result=await WebAssembly.instantiate(bytes,go.importObject);
+    }
+    go.run(result.instance);
+    wasmReady=true;
+    drop.classList.remove('disabled');
+    dropText.textContent='拖拽 .armour 文件到此处';
+    st.className='status ok';
+    st.textContent='就绪';
+    setTimeout(()=>{st.className='status';st.textContent=''},2000);
+  }catch(e){
+    st.className='status err';
+    st.textContent='加载失败: '+e.message;
+  }
+}
+
+window._wasmReady=()=>{};
+loadWasm();
+
+drop.onclick=()=>{if(wasmReady)file.click()};
+drop.ondragover=e=>{e.preventDefault();if(wasmReady)drop.classList.add('over')};
+drop.ondragleave=()=>drop.classList.remove('over');
+drop.ondrop=e=>{e.preventDefault();drop.classList.remove('over');if(wasmReady&&e.dataTransfer.files.length)convert(e.dataTransfer.files[0])};
+file.onchange=()=>{if(wasmReady&&file.files.length)convert(file.files[0])};
+
+async function convert(f){
+  st.className='status loading';
+  st.textContent='转换中...';
+  try{
+    const buf=await f.arrayBuffer();
+    const arr=new Uint8Array(buf);
+    const t0=performance.now();
+    const result=convertArmour(arr,'free');
+    const ms=Math.round(performance.now()-t0);
+    if(result.error) throw new Error(result.error);
+    const blob=new Blob([result.data],{type:'application/json'});
+    const url=URL.createObjectURL(blob);
+    const a=document.createElement('a');
+    const name=f.name.replace(/\.[^.]+$/,'')+'.bbmodel';
+    a.href=url;a.download=name;a.click();
+    URL.revokeObjectURL(url);
+    const kb=Math.round(blob.size/1024);
+    st.className='status ok';
+    st.textContent=`已下载 ${name} (${kb}KB, ${ms}ms)`;
+  }catch(e){
+    st.className='status err';
+    st.textContent=e.message;
+  }
+}
+</script>
+</body>
+</html>

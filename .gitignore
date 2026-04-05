@@ -1,0 +1,25 @@
+# Build output
+*.exe
+*.wasm
+*.wasm.gz
+
+# Test output
+*.bbmodel
+!web/static/*.html
+
+# Go
+vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Debug tools
+cmd/debug/
+cmd/texdump/
