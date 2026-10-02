@@ -8,6 +8,9 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"strconv"
+	"unicode/utf16"
+	"unicode/utf8"
 )
 
 // CubeType 方块类型
@@ -36,7 +39,7 @@ func (c PaintColor) ToRGB() int {
 }
 
 func (c PaintColor) IsEmpty() bool {
-	return c.R == 0 && c.G == 0 && c.B == 0 && c.PaintType == 0
+	return c.PaintType == 0
 }
 
 // Vec3i 整数三维向量
@@ -64,17 +67,29 @@ type PartData struct {
 	Cubes    []CubeData
 	Markers  []Marker
 	Children []*PartData
+	// Properties contains this part's own settings, or the numbered settings of its
+	// source outfit equipment. Parsed parts always have a non-nil map; children do
+	// not inherit wing settings from their parent.
+	Properties map[string]string
+	// EquipmentIndex is the zero-based source outfit entry, not a visual body category.
+	EquipmentIndex *int
 
 	// Transform
 	TranslateX, TranslateY, TranslateZ float32
 	RotationX, RotationY, RotationZ    float32
 	ScaleX, ScaleY, ScaleZ             float32
+	OffsetX, OffsetY, OffsetZ          float32
+	PivotX, PivotY, PivotZ             float32
+	// Matrix contains a column-major affine transform when the source stores a matrix.
+	Matrix *[16]float32
 }
 
 func (p *PartData) HasTransform() bool {
 	return p.TranslateX != 0 || p.TranslateY != 0 || p.TranslateZ != 0 ||
 		p.RotationX != 0 || p.RotationY != 0 || p.RotationZ != 0 ||
-		p.ScaleX != 1 || p.ScaleY != 1 || p.ScaleZ != 1
+		p.ScaleX != 1 || p.ScaleY != 1 || p.ScaleZ != 1 ||
+		p.OffsetX != 0 || p.OffsetY != 0 || p.OffsetZ != 0 ||
+		p.PivotX != 0 || p.PivotY != 0 || p.PivotZ != 0 || p.Matrix != nil
 }
 
 // DisplayName 获取可读的部件名称
@@ -95,6 +110,7 @@ type SkinFile struct {
 	Properties  map[string]string
 	PaintData   []int32
 	Parts       []*PartData
+	Warnings    []string
 }
 
 func (s *SkinFile) CustomName() string {
@@ -168,7 +184,37 @@ func readString(r io.Reader) (string, error) {
 	if _, err := io.ReadFull(r, data); err != nil {
 		return "", err
 	}
-	return string(data), nil
+	if utf8.Valid(data) {
+		return string(data), nil
+	}
+	// Older Java DataOutputStream.writeUTF exports use modified UTF-8 (NUL and surrogate pairs).
+	// Current AW exports use ordinary UTF-8; valid UTF-8 always takes the direct path above.
+	var units []uint16
+	for i := 0; i < len(data); {
+		b := data[i]
+		switch {
+		case b < 0x80:
+			units = append(units, uint16(b))
+			i++
+		case b&0xe0 == 0xc0 && i+1 < len(data) && data[i+1]&0xc0 == 0x80:
+			v := uint16(b&0x1f)<<6 | uint16(data[i+1]&0x3f)
+			if v < 0x80 && v != 0 {
+				return "", fmt.Errorf("invalid string encoding")
+			}
+			units = append(units, v)
+			i += 2
+		case b&0xf0 == 0xe0 && i+2 < len(data) && data[i+1]&0xc0 == 0x80 && data[i+2]&0xc0 == 0x80:
+			v := uint16(b&0x0f)<<12 | uint16(data[i+1]&0x3f)<<6 | uint16(data[i+2]&0x3f)
+			if v < 0x800 {
+				return "", fmt.Errorf("invalid string encoding")
+			}
+			units = append(units, v)
+			i += 3
+		default:
+			return "", fmt.Errorf("invalid string encoding")
+		}
+	}
+	return string(utf16.Decode(units)), nil
 }
 
 // readInt32 读取大端 int32
@@ -219,20 +265,21 @@ func float32FromBits(b uint32) float32 {
 
 // readVarInt 读取变长整数
 func readVarInt(r io.Reader) (int, error) {
-	value := 0
-	shift := 0
-	for {
+	var value uint32
+	for i := 0; i < 5; i++ {
 		b, err := readByte(r)
 		if err != nil {
 			return 0, err
 		}
-		value |= int(b&0x7F) << shift
-		shift += 7
+		if i == 4 && b&0xF0 != 0 {
+			return 0, fmt.Errorf("invalid 32-bit VarInt")
+		}
+		value |= uint32(b&0x7F) << (7 * i)
 		if b&0x80 == 0 {
-			break
+			return int(int32(value)), nil
 		}
 	}
-	return value, nil
+	return 0, fmt.Errorf("VarInt exceeds five bytes")
 }
 
 // readVarString 读取变长字符串
@@ -241,7 +288,10 @@ func readVarString(r io.Reader) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if length <= 0 {
+	if length < 0 || length > maxStringBytes {
+		return "", fmt.Errorf("invalid string length: %d", length)
+	}
+	if length == 0 {
 		return "", nil
 	}
 	data := make([]byte, length)
@@ -255,8 +305,18 @@ func readVarString(r io.Reader) (string, error) {
 // 格式: count(4B) + [key(UTF) + type(1B) + value(typed)] * count
 // type: 0=STRING, 1=INT, 2=DOUBLE, 3=BOOLEAN, 4=LIST, 5=COMPOUND, 6=FLOAT, 7=LONG
 func readProperties(r io.Reader) (map[string]string, error) {
+	return readPropertiesDepth(r, 0)
+}
+
+func readPropertiesDepth(r io.Reader, depth int) (map[string]string, error) {
+	if depth > maxPropertyDepth {
+		return nil, fmt.Errorf("property nesting exceeds %d", maxPropertyDepth)
+	}
 	count, err := readInt32(r)
 	if err != nil {
+		return nil, err
+	}
+	if err := checkCount("properties", int(count), maxProperties); err != nil {
 		return nil, err
 	}
 	props := make(map[string]string, count)
@@ -269,7 +329,7 @@ func readProperties(r io.Reader) (map[string]string, error) {
 		if err != nil {
 			return nil, fmt.Errorf("reading property type for key %q: %w", key, err)
 		}
-		value, err := readTypedValue(r, typeByte)
+		value, err := readTypedValueDepth(r, typeByte, depth)
 		if err != nil {
 			return nil, fmt.Errorf("reading property value for key %q (type %d): %w", key, typeByte, err)
 		}
@@ -280,6 +340,13 @@ func readProperties(r io.Reader) (map[string]string, error) {
 
 // readTypedValue 根据类型字节读取对应类型的值，统一转为字符串
 func readTypedValue(r io.Reader, typeByte byte) (string, error) {
+	return readTypedValueDepth(r, typeByte, 0)
+}
+
+func readTypedValueDepth(r io.Reader, typeByte byte, depth int) (string, error) {
+	if depth > maxPropertyDepth {
+		return "", fmt.Errorf("property nesting exceeds %d", maxPropertyDepth)
+	}
 	switch typeByte {
 	case 0: // STRING
 		s, err := readString(r)
@@ -294,13 +361,16 @@ func readTypedValue(r io.Reader, typeByte byte) (string, error) {
 		}
 		bits := uint64(buf[0])<<56 | uint64(buf[1])<<48 | uint64(buf[2])<<40 | uint64(buf[3])<<32 |
 			uint64(buf[4])<<24 | uint64(buf[5])<<16 | uint64(buf[6])<<8 | uint64(buf[7])
-		return fmt.Sprintf("%f", math.Float64frombits(bits)), nil
+		return strconv.FormatFloat(math.Float64frombits(bits), 'g', -1, 64), nil
 	case 3: // BOOLEAN
 		b, err := readBool(r)
 		return fmt.Sprintf("%t", b), err
 	case 4: // LIST
 		size, err := readInt32(r)
 		if err != nil {
+			return "", err
+		}
+		if err := checkCount("list elements", int(size), maxProperties); err != nil {
 			return "", err
 		}
 		if size == 0 {
@@ -312,17 +382,17 @@ func readTypedValue(r io.Reader, typeByte byte) (string, error) {
 			return "", err
 		}
 		for j := int32(0); j < size; j++ {
-			if _, err := readTypedValue(r, elemType); err != nil {
+			if _, err := readTypedValueDepth(r, elemType, depth+1); err != nil {
 				return "", err
 			}
 		}
 		return "[]", nil
 	case 5: // COMPOUND (嵌套属性)
-		_, err := readProperties(r)
+		_, err := readPropertiesDepth(r, depth+1)
 		return "{}", err
 	case 6: // FLOAT
 		v, err := readFloat32(r)
-		return fmt.Sprintf("%f", v), err
+		return strconv.FormatFloat(float64(v), 'g', -1, 32), err
 	case 7: // LONG
 		var buf [8]byte
 		if _, err := io.ReadFull(r, buf[:]); err != nil {
@@ -334,6 +404,24 @@ func readTypedValue(r io.Reader, typeByte byte) (string, error) {
 	default:
 		return "", fmt.Errorf("unknown property type: %d", typeByte)
 	}
+}
+
+// Limits keep malformed uploads bounded in both the native CLI and browser WASM.
+const (
+	MaxInputBytes    = 64 << 20
+	maxDecodedBytes  = 128 << 20
+	maxStringBytes   = 1 << 20
+	maxCubes         = 1_000_000
+	maxParts         = 4096
+	maxProperties    = 16384
+	maxPropertyDepth = 32
+)
+
+func checkCount(name string, count, limit int) error {
+	if count < 0 || count > limit {
+		return fmt.Errorf("invalid %s count %s (maximum %d)", name, strconv.Itoa(count), limit)
+	}
+	return nil
 }
 
 // skinTypeByLegacyID 旧版 ID 到类型名的映射

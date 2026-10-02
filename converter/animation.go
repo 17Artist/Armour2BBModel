@@ -7,17 +7,14 @@ import (
 	"fmt"
 	"math"
 	"strconv"
-	"strings"
 
 	"github.com/17Artist/Armour2BBModel/bbmodel"
 	"github.com/17Artist/Armour2BBModel/skin"
 )
 
 type WingAnimParams struct {
-	MinAngle  float64
-	MaxAngle  float64
-	IdleSpeed float64
-	MoveType  string
+	MinAngle, MaxAngle, IdleSpeed float64
+	MoveType                      string
 }
 
 func DefaultWingParams() WingAnimParams {
@@ -26,19 +23,16 @@ func DefaultWingParams() WingAnimParams {
 
 func ParseWingParams(props map[string]string) WingAnimParams {
 	p := DefaultWingParams()
-	if v, ok := props["wingsMaxAngle"]; ok {
-		if f, err := strconv.ParseFloat(v, 64); err == nil {
-			p.MaxAngle = f
-		}
-	}
-	if v, ok := props["wingsMinAngle"]; ok {
-		if f, err := strconv.ParseFloat(v, 64); err == nil {
-			p.MinAngle = f
-		}
-	}
-	if v, ok := props["wingsIdleSpeed"]; ok {
-		if f, err := strconv.ParseFloat(v, 64); err == nil {
-			p.IdleSpeed = f
+	for _, entry := range []struct {
+		key string
+		dst *float64
+	}{
+		{"wingsMinAngle", &p.MinAngle}, {"wingsMaxAngle", &p.MaxAngle}, {"wingsIdleSpeed", &p.IdleSpeed},
+	} {
+		if v, ok := props[entry.key]; ok {
+			if f, err := strconv.ParseFloat(v, 64); err == nil && !math.IsNaN(f) && !math.IsInf(f, 0) {
+				*entry.dst = f
+			}
 		}
 	}
 	if v, ok := props["wingsMovmentType"]; ok {
@@ -47,127 +41,160 @@ func ParseWingParams(props map[string]string) WingAnimParams {
 	return p
 }
 
-func fmtAngle(v float64) string {
-	if v == 0 {
-		return "0"
-	}
-	return fmt.Sprintf("%.1f", v)
+// A wing is an attachment mechanism, not necessarily the visible anatomy of a costume.
+// Bind by the source part itself: outfits can contain many parts of the same wing type.
+type wingBinding struct {
+	part            *skin.PartData
+	groupUUID, name string
+	params          WingAnimParams
+	axis, worldAxis [3]float64
+	baseAngle       float64
+	parent          affine
+	origin          [3]float32
 }
 
-// markerToBBOrigin 将 AW marker 坐标转为 BBModel 绝对坐标（方块中心）
-// AW marker (x,y,z) 指向一个方块位置，方块在 BBModel 中的中心是：
-//
-//	X: -(x+0.5) + awOrigin.X  (X翻转，方块中心在 -x-0.5)
-//	Y: -(y+0.5) + awOrigin.Y  (Y翻转)
-//	Z: z+0.5 + awOrigin.Z     (Z不翻转)
-func markerToBBOrigin(marker skin.Marker, awOrigin [3]float32) [3]float32 {
-	return [3]float32{
-		-float32(marker.X) - 0.5 + awOrigin[0],
-		-float32(marker.Y) - 0.5 + awOrigin[1],
-		float32(marker.Z) + 0.5 + awOrigin[2],
+func wingForPart(p *skin.PartData, sf *skin.SkinFile, parent affine) *wingBinding {
+	left := false
+	switch p.PartType {
+	case "armourers:wings.leftWing":
+		left = true
+	case "armourers:wings.rightWing":
+	default:
+		return nil
 	}
+	if len(p.Markers) == 0 {
+		return nil
+	}
+	marker := p.Markers[0]
+	// SkinMarker.direction = OpenDirection(meta - 1); NONE means no rotation.
+	var axis [3]float64
+	switch marker.Meta {
+	case 1:
+		axis = [3]float64{0, -1, 0} // DOWN
+	case 2:
+		axis = [3]float64{0, 1, 0} // UP
+	case 3:
+		axis = [3]float64{0, 0, 1} // NORTH
+	case 4:
+		axis = [3]float64{0, 0, -1} // SOUTH
+	case 5:
+		axis = [3]float64{-1, 0, 0} // WEST
+	case 6:
+		axis = [3]float64{1, 0, 0} // EAST
+	default:
+		return nil
+	}
+	if !left {
+		for i := range axis {
+			axis[i] = -axis[i]
+		}
+	}
+	props := p.Properties
+	// Programmatic callers may omit the bound part map. Parsed files always have a map.
+	if props == nil && sf.SkinType == "armourers:wings" {
+		props = sf.Properties
+	}
+	if len(props) == 0 {
+		return nil
+	}
+	w := &wingBinding{part: p, params: ParseWingParams(props), axis: axis, parent: parent}
+	w.baseAngle = w.angle(0)
+	// The saved marker is in the parent coordinate frame, before the part transform.
+	point := parent.point(float64(marker.X)+.5, float64(marker.Y)+.5, float64(marker.Z)+.5)
+	bone := PartToBone[p.PartType]
+	w.origin = [3]float32{-float32(point[0]) + bone.AWOrigin[0], -float32(point[1]) + bone.AWOrigin[1], float32(point[2]) + bone.AWOrigin[2]}
+	signs := [3]float64{-1, -1, 1}
+	length := 0.0
+	for row := 0; row < 3; row++ {
+		for col := 0; col < 3; col++ {
+			w.worldAxis[row] += signs[row] * parent[row*4+col] * axis[col]
+		}
+		length += w.worldAxis[row] * w.worldAxis[row]
+	}
+	length = math.Sqrt(length)
+	if length > 0 {
+		for i := range w.worldAxis {
+			w.worldAxis[i] /= length
+		}
+	}
+	return w
 }
 
-// GenerateWingAnimation 生成翅膀 idle 动画
-// 每个翅膀的枢轴点由各自的 marker 位置决定
-func GenerateWingAnimation(model *bbmodel.Model, sf *skin.SkinFile, groupUUIDs map[string]string) {
-	params := ParseWingParams(sf.Properties)
-	periodSec := math.Round(params.IdleSpeed/1000.0*100) / 100
+func (w *wingBinding) period() float64 { return math.Max(w.params.IdleSpeed/1000, .1) }
 
-	interpolation := "linear"
-	if params.MoveType == "EASE" {
-		interpolation = "catmullrom"
+// This matches WingPartTransform.rotationDegrees, including LINEAR's deliberate sawtooth.
+func (w *wingBinding) angle(phase float64) float64 {
+	rangeAngle := w.params.MaxAngle - w.params.MinAngle
+	if w.params.MoveType == "LINEAR" {
+		return rangeAngle * phase
 	}
+	return -w.params.MinAngle - rangeAngle*(math.Sin(phase*2*math.Pi)+1)/2
+}
 
-	type wingData struct {
-		boneName string
-		bone     *Bone
-		marker   skin.Marker
-		isLeft   bool
-	}
-	var wings []wingData
+func axisRotation(axis [3]float64, degrees float64) affine {
+	x, y, z := axis[0], axis[1], axis[2]
+	c, s := math.Cos(degrees*math.Pi/180), math.Sin(degrees*math.Pi/180)
+	t := 1 - c
+	return affine{x*x*t + c, x*y*t - z*s, x*z*t + y*s, 0, y*x*t + z*s, y*y*t + c, y*z*t - x*s, 0, z*x*t - y*s, z*y*t + x*s, z*z*t + c, 0, 0, 0, 0, 1}
+}
 
-	for _, part := range sf.Parts {
-		if len(part.Markers) == 0 {
+func (w *wingBinding) localMatrix() affine {
+	m := w.part.Markers[0]
+	x, y, z := float64(m.X)+.5, float64(m.Y)+.5, float64(m.Z)+.5
+	return multiply(multiply(translation(x, y, z), axisRotation(w.axis, w.baseAngle)), translation(-x, -y, -z))
+}
+
+func appendWingAnimations(model *bbmodel.Model, wings []*wingBinding) {
+	// Separate source equipments can have different periods. Keep independent animations;
+	// constant-angle parts already have their exact pose baked, and need no idle animation.
+	byKey := map[string]int{}
+	for _, w := range wings {
+		if w.params.MinAngle == w.params.MaxAngle {
 			continue
 		}
-		bone := PartToBone[part.PartType]
-		if bone == nil {
-			continue
+		key := fmt.Sprintf("%v", w.period())
+		name := "idle"
+		if w.part.EquipmentIndex != nil {
+			key = fmt.Sprintf("%d:%s", *w.part.EquipmentIndex, key)
+			name = fmt.Sprintf("idle_equipment_%d", *w.part.EquipmentIndex+1)
 		}
-		isLeft := strings.Contains(part.PartType, "left") || strings.Contains(part.PartType, "Left")
-		switch part.PartType {
-		case "armourers:wings.leftWing", "armourers:wings.leftWing2",
-			"armourers:wings.rightWing", "armourers:wings.rightWing2":
-			wings = append(wings, wingData{
-				boneName: bone.Name,
-				bone:     bone,
-				marker:   part.Markers[0],
-				isLeft:   isLeft,
-			})
-		}
-	}
-
-	if len(wings) == 0 {
-		return
-	}
-
-	// 将翅膀骨骼 origin 更新为 marker 位置
-	for _, w := range wings {
-		origin := markerToBBOrigin(w.marker, w.bone.AWOrigin)
-		for i := range model.Groups {
-			if model.Groups[i].Name == w.boneName {
-				model.Groups[i].Origin = origin
-			}
-		}
-		prefix := w.boneName + "_"
-		for i := range model.Elements {
-			if len(model.Elements[i].Name) >= len(prefix) && model.Elements[i].Name[:len(prefix)] == prefix {
-				model.Elements[i].Origin = origin
-			}
-		}
-	}
-
-	animators := map[string]bbmodel.Animator{}
-
-	makeKFs := func(minA, maxA float64) []bbmodel.Keyframe {
-		return []bbmodel.Keyframe{
-			{Channel: "rotation", DataPoints: []bbmodel.DataPoint{{X: "0", Y: fmtAngle(minA), Z: "0"}},
-				UUID: bbmodel.NewUUID(), Time: 0, Color: -1, Interpolation: interpolation},
-			{Channel: "rotation", DataPoints: []bbmodel.DataPoint{{X: "0", Y: fmtAngle(maxA), Z: "0"}},
-				UUID: bbmodel.NewUUID(), Time: periodSec / 2, Color: -1, Interpolation: interpolation},
-			{Channel: "rotation", DataPoints: []bbmodel.DataPoint{{X: "0", Y: fmtAngle(minA), Z: "0"}},
-				UUID: bbmodel.NewUUID(), Time: periodSec, Color: -1, Interpolation: interpolation},
-		}
-	}
-
-	for _, w := range wings {
-		uuid, ok := groupUUIDs[w.boneName]
+		index, ok := byKey[key]
 		if !ok {
-			continue
+			index = len(model.Animations)
+			byKey[key] = index
+			model.Animations = append(model.Animations, bbmodel.Animation{UUID: bbmodel.NewUUID(), Name: name, Loop: "loop", Length: w.period(), Snapping: 24, Animators: map[string]bbmodel.Animator{}})
 		}
-		// V5 rotation Y 取反
-		// 右翼向外展开 = 实际 +Y → bbmodel -Y
-		// 左翼向外展开 = 实际 -Y → bbmodel +Y
-		if w.isLeft {
-			animators[uuid] = bbmodel.Animator{
-				Name: w.boneName, Type: "bone",
-				Keyframes: makeKFs(params.MinAngle, params.MaxAngle),
-			}
-		} else {
-			animators[uuid] = bbmodel.Animator{
-				Name: w.boneName, Type: "bone",
-				Keyframes: makeKFs(-params.MinAngle, -params.MaxAngle),
-			}
+		steps := 32 // sampled sine; LINEAR needs only its endpoints and the loop discontinuity
+		if w.params.MoveType == "LINEAR" {
+			steps = 1
 		}
+		frames := make([]bbmodel.Keyframe, 0, steps+1)
+		for step := 0; step <= steps; step++ {
+			phase := float64(step) / float64(steps)
+			delta := w.angle(phase) - w.baseAngle
+			r := axisRotation(w.worldAxis, delta)
+			_, _, _, rotation, err := mapTransformedBox(MergedBox{MaxX: 1, MaxY: 1, MaxZ: 1}, r, [3]float32{})
+			if err != nil {
+				continue
+			}
+			// mapTransformedBox changes the AW basis; r already uses the BB basis.
+			rotation[0], rotation[1] = -rotation[0], -rotation[1]
+			// Do not wrap a full turn into a short Euler angle on a principal axis.
+			for axis, value := range w.worldAxis {
+				if math.Abs(math.Abs(value)-1) < 1e-6 {
+					rotation = [3]float32{}
+					rotation[axis] = float32(value * delta)
+					break
+				}
+			}
+			fmtValue := func(v float32) string {
+				if math.Abs(float64(v)) < 1e-5 {
+					return "0"
+				}
+				return strconv.FormatFloat(float64(v), 'f', 5, 32)
+			}
+			frames = append(frames, bbmodel.Keyframe{Channel: "rotation", DataPoints: []bbmodel.DataPoint{{X: fmtValue(rotation[0]), Y: fmtValue(rotation[1]), Z: fmtValue(rotation[2])}}, UUID: bbmodel.NewUUID(), Time: phase * w.period(), Color: -1, Interpolation: "linear"})
+		}
+		model.Animations[index].Animators[w.groupUUID] = bbmodel.Animator{Name: w.name, Type: "bone", Keyframes: frames}
 	}
-
-	if len(animators) == 0 {
-		return
-	}
-
-	model.Animations = append(model.Animations, bbmodel.Animation{
-		UUID: bbmodel.NewUUID(), Name: "idle", Loop: "loop",
-		Length: periodSec, Snapping: 24, Animators: animators,
-	})
 }

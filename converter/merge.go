@@ -19,8 +19,12 @@ type MergedBox struct {
 type MergedFace struct {
 	Visible bool
 	Colors  [][]skin.PaintColor
-	Width   int
-	Height  int
+	// Mask preserves culled texels on a partially visible merged face.
+	// A nil mask means that every texel is visible.
+	Mask   [][]bool
+	Alpha  byte // zero defaults to opaque for manually constructed faces
+	Width  int
+	Height int
 }
 
 func (b *MergedBox) SizeX() int { return b.MaxX - b.MinX }
@@ -32,21 +36,15 @@ type mergeEntry struct {
 	cube skin.CubeData
 }
 
-// GreedyMerge 尝试 3轴×2方向=6 种切片策略，取 box 数最少的
+// GreedyMerge partitions each material component independently. The original
+// six scans are included in the 48 directional candidates; a bounded exact
+// search improves small components without sacrificing an incumbent result.
 func GreedyMerge(cubes []skin.CubeData, vis []FaceVisibility) []MergedBox {
 	if len(cubes) == 0 {
 		return nil
 	}
 
-	var best []MergedBox
-	for _, axis := range []int{0, 1, 2} {
-		for _, swap := range []bool{false, true} {
-			r := sliceMerge(cubes, axis, swap)
-			if best == nil || len(r) < len(best) {
-				best = r
-			}
-		}
-	}
+	best := partitionComponents(cubes)
 
 	posMap := make(map[skin.Vec3i]*mergeEntry, len(cubes))
 	for i := range cubes {
@@ -278,14 +276,23 @@ func buildMergedFaces(box *MergedBox, posMap map[skin.Vec3i]*mergeEntry, vis []F
 	box.Faces[skin.FaceEast] = buildFace(skin.FaceEast, sz, sy, func(u, v int) skin.Vec3i {
 		return skin.Vec3i{X: box.MaxX - 1, Y: box.MinY + v, Z: box.MinZ + u}
 	}, posMap, vis)
+	for i := range box.Faces {
+		box.Faces[i].Alpha = 255
+		if box.CubeType.IsGlass() {
+			box.Faces[i].Alpha = 127
+		}
+	}
 }
 
 func buildFace(faceDir int, w, h int, posAt func(u, v int) skin.Vec3i, posMap map[skin.Vec3i]*mergeEntry, vis []FaceVisibility) MergedFace {
 	mf := MergedFace{Width: w, Height: h, Visible: true}
 	mf.Colors = make([][]skin.PaintColor, h)
+	mf.Mask = make([][]bool, h)
 	allHidden := true
+	visibleCount := 0
 	for v := 0; v < h; v++ {
 		mf.Colors[v] = make([]skin.PaintColor, w)
+		mf.Mask[v] = make([]bool, w)
 		for u := 0; u < w; u++ {
 			ci, ok := posMap[posAt(u, v)]
 			if !ok {
@@ -293,13 +300,18 @@ func buildFace(faceDir int, w, h int, posAt func(u, v int) skin.Vec3i, posMap ma
 				return mf
 			}
 			mf.Colors[v][u] = ci.cube.FaceColors[faceDir]
-			if vis[ci.idx].Visible[faceDir] {
+			if len(vis) == 0 || vis[ci.idx].Visible[faceDir] {
+				mf.Mask[v][u] = true
+				visibleCount++
 				allHidden = false
 			}
 		}
 	}
 	if allHidden {
 		mf.Visible = false
+		mf.Colors, mf.Mask = nil, nil
+	} else if visibleCount == w*h {
+		mf.Mask = nil
 	}
 	return mf
 }

@@ -105,6 +105,9 @@ func readPartV13(r io.Reader) (*PartData, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := checkCount("cubes", int(cubeCount), maxCubes); err != nil {
+		return nil, err
+	}
 
 	stride := 4 + 4*6
 	data := make([]byte, int(cubeCount)*stride)
@@ -118,6 +121,9 @@ func readPartV13(r io.Reader) (*PartData, error) {
 
 	markerCount, err := readInt32(r)
 	if err != nil {
+		return nil, err
+	}
+	if err := checkCount("markers", int(markerCount), maxCubes); err != nil {
 		return nil, err
 	}
 	for i := int32(0); i < markerCount; i++ {

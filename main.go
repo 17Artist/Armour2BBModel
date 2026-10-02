@@ -19,6 +19,9 @@ func main() {
 	sub, _ := fs.Sub(static, "web/static")
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Vary", "Accept-Encoding")
+		// The bootstrap JS and Go WASM runtime must come from the same build.
+		w.Header().Set("Cache-Control", "no-cache")
 		path := r.URL.Path
 		if path == "/" {
 			path = "/index.html"
@@ -38,7 +41,6 @@ func main() {
 				}
 				w.Header().Set("Content-Type", ct)
 				w.Header().Set("Content-Encoding", "gzip")
-				w.Header().Set("Cache-Control", "public, max-age=86400")
 				w.Write(data)
 				return
 			}

@@ -4,7 +4,8 @@
 package skin
 
 import (
-	"bufio"
+	"bytes"
+	"compress/gzip"
 	"fmt"
 	"io"
 )
@@ -13,7 +14,28 @@ const headerMagic int32 = 0x534B494E // "SKIN"
 
 // Read 从输入流读取 AW skin 文件，自动检测版本
 func Read(r io.Reader) (*SkinFile, error) {
-	br := bufio.NewReader(r)
+	data, err := io.ReadAll(io.LimitReader(r, MaxInputBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("reading skin file: %w", err)
+	}
+	if len(data) > MaxInputBytes {
+		return nil, fmt.Errorf("skin file exceeds %d MiB", MaxInputBytes>>20)
+	}
+	if len(data) >= 2 && data[0] == 0x1f && data[1] == 0x8b {
+		gr, err := gzip.NewReader(bytes.NewReader(data))
+		if err != nil {
+			return nil, fmt.Errorf("opening compressed skin: %w", err)
+		}
+		data, err = io.ReadAll(io.LimitReader(gr, maxDecodedBytes+1))
+		gr.Close()
+		if err != nil {
+			return nil, fmt.Errorf("decompressing skin: %w", err)
+		}
+		if len(data) > maxDecodedBytes {
+			return nil, fmt.Errorf("decompressed skin exceeds limit")
+		}
+	}
+	br := bytes.NewReader(data)
 
 	firstInt, err := readInt32(br)
 	if err != nil {
@@ -32,13 +54,27 @@ func Read(r io.Reader) (*SkinFile, error) {
 		fileVersion = int(firstInt)
 	}
 
-	if fileVersion >= 20 {
-		return readV20(br, fileVersion)
+	var sf *SkinFile
+	if fileVersion >= 20 && fileVersion <= 25 {
+		sf, err = readV20(br, fileVersion)
 	} else if fileVersion == 13 {
-		return readV13(br, fileVersion)
-	} else if fileVersion >= 1 {
-		return readV12(br, fileVersion)
+		sf, err = readV13(br, fileVersion)
+	} else if fileVersion >= 1 && fileVersion <= 12 {
+		sf, err = readV12(br, fileVersion)
+	} else {
+		return nil, fmt.Errorf("unsupported file version: %d", fileVersion)
 	}
-
-	return nil, fmt.Errorf("unsupported file version: %d", fileVersion)
+	if err != nil {
+		return nil, err
+	}
+	if br.Len() != 0 {
+		return nil, fmt.Errorf("unexpected %d trailing bytes", br.Len())
+	}
+	if err = bindPartProperties(sf); err != nil {
+		return nil, err
+	}
+	if len(sf.PaintData) > 0 {
+		sf.Warnings = append(sf.Warnings, "玩家彩绘数据未导出，仅转换体素几何")
+	}
+	return sf, nil
 }

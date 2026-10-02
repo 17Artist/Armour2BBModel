@@ -6,14 +6,16 @@ package bbmodel
 import "github.com/google/uuid"
 
 type Model struct {
-	Meta       Meta        `json:"meta"`
-	Name       string      `json:"name"`
-	Resolution *Resolution `json:"resolution,omitempty"`
-	Elements   []Element   `json:"elements"`
-	Groups     []Group     `json:"groups"`
-	Outliner   []any       `json:"outliner"`
-	Textures   []Texture   `json:"textures"`
-	Animations []Animation `json:"animations,omitempty"`
+	Meta                      Meta        `json:"meta"`
+	Name                      string      `json:"name"`
+	Resolution                *Resolution `json:"resolution,omitempty"`
+	Elements                  []Element   `json:"elements"`
+	Groups                    []Group     `json:"groups"`
+	Outliner                  []any       `json:"outliner"`
+	Textures                  []Texture   `json:"textures"`
+	Animations                []Animation `json:"animations,omitempty"`
+	SurfaceDeduplicatedTexels int         `json:"surface_deduplicated_texels,omitempty"`
+	ClassificationNotes       []string    `json:"classification_notes,omitempty"`
 }
 
 type Meta struct {
@@ -28,6 +30,7 @@ type Resolution struct {
 }
 
 type Element struct {
+	CostumeSlot   string          `json:"costume_slot"`
 	Name          string          `json:"name"`
 	BoxUV         bool            `json:"box_uv"`
 	RenderOrder   string          `json:"render_order"`
@@ -37,6 +40,7 @@ type Element struct {
 	Autouv        int             `json:"autouv"`
 	Color         int             `json:"color"`
 	Origin        [3]float32      `json:"origin"`
+	Rotation      [3]float32      `json:"rotation"`
 	Faces         map[string]Face `json:"faces"`
 	Type          string          `json:"type"`
 	UUID          string          `json:"uuid"`
@@ -45,11 +49,16 @@ type Element struct {
 }
 
 type Face struct {
-	UV      [4]float32 `json:"uv"`
-	Texture *int       `json:"texture,omitempty"`
+	UV [4]float32 `json:"uv"`
+	// Blockbench draws an untextured face if texture is omitted. Explicit null
+	// disables the face, as required for culled and NONE-painted surfaces.
+	Texture *int `json:"texture"`
 }
 
 type Group struct {
+	CostumeSlot     string     `json:"costume_slot"`
+	TargetBone      string     `json:"target_bone,omitempty"`
+	SourceIndex     *int       `json:"source_index,omitempty"`
 	UUID            string     `json:"uuid"`
 	Export          bool       `json:"export"`
 	Locked          bool       `json:"locked"`
@@ -57,6 +66,11 @@ type Group struct {
 	Rotation        [3]float32 `json:"rotation"`
 	Color           int        `json:"color"`
 	Name            string     `json:"name"`
+	SourcePart      string     `json:"source_part,omitempty"`
+	SourceName      string     `json:"source_name,omitempty"`
+	SourceEquipment *int       `json:"source_equipment,omitempty"`
+	JointOnly       bool       `json:"joint_only,omitempty"`
+	Attachment      string     `json:"attachment,omitempty"`
 	Children        []any      `json:"children"`
 	Reset           bool       `json:"reset"`
 	Shade           bool       `json:"shade"`

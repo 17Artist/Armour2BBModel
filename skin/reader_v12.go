@@ -129,7 +129,18 @@ func readSkinTypeV12(r io.Reader, version int) (string, error) {
 }
 
 func readPartV12(r io.Reader, version int) (*PartData, error) {
-	regName, err := readString(r)
+	var regName string
+	var err error
+	if version < 6 {
+		var id byte
+		id, err = readByte(r)
+		if int(id) >= len(legacyPartNames) {
+			return nil, fmt.Errorf("unknown legacy part ID: %d", id)
+		}
+		regName = legacyPartNames[id]
+	} else {
+		regName, err = readString(r)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -141,6 +152,9 @@ func readPartV12(r io.Reader, version int) (*PartData, error) {
 
 	cubeCount, err := readInt32(r)
 	if err != nil {
+		return nil, err
+	}
+	if err := checkCount("cubes", int(cubeCount), maxCubes); err != nil {
 		return nil, err
 	}
 
@@ -157,7 +171,7 @@ func readPartV12(r io.Reader, version int) (*PartData, error) {
 		}
 	} else {
 		for i := int32(0); i < cubeCount; i++ {
-			cube, err := readLegacyCube(r, version)
+			cube, err := readLegacyCube(r, version, part.PartType)
 			if err != nil {
 				return nil, err
 			}
@@ -165,8 +179,14 @@ func readPartV12(r io.Reader, version int) (*PartData, error) {
 		}
 	}
 
+	if version <= 8 {
+		return part, nil
+	}
 	markerCount, err := readInt32(r)
 	if err != nil {
+		return nil, err
+	}
+	if err := checkCount("markers", int(markerCount), maxCubes); err != nil {
 		return nil, err
 	}
 	for i := int32(0); i < markerCount; i++ {
@@ -188,7 +208,7 @@ func readPartV12(r io.Reader, version int) (*PartData, error) {
 func parseCubeBytes(data []byte, off int, version int) CubeData {
 	cube := CubeData{
 		Pos:  Vec3i{int(int8(data[off+1])), int(int8(data[off+2])), int(int8(data[off+3]))},
-		Type: CubeType(data[off] & 0x0F),
+		Type: CubeType(data[off]),
 	}
 	for side := 0; side < 6; side++ {
 		base := off + 4 + side*4
@@ -203,7 +223,28 @@ func parseCubeBytes(data []byte, off int, version int) CubeData {
 	return cube
 }
 
-func readLegacyCube(r io.Reader, version int) (CubeData, error) {
+var legacyPartNames = []string{
+	"armourers:head.base", "armourers:chest.base", "armourers:chest.leftArm", "armourers:chest.rightArm",
+	"armourers:legs.leftLeg", "armourers:legs.rightLeg", "armourers:skirt.base", "armourers:feet.leftFoot",
+	"armourers:feet.rightFoot", "armourers:sword.base", "armourers:bow.base",
+}
+
+func readLegacyCube(r io.Reader, version int, partType string) (CubeData, error) {
+	if version < 3 {
+		var data [8]byte
+		if _, err := io.ReadFull(r, data[:]); err != nil {
+			return CubeData{}, err
+		}
+		x, y, z := int(int8(data[0])), int(int8(data[1])), int(int8(data[2]))
+		if version == 1 {
+			switch partType {
+			case "armourers:sword.base", "armourers:legs.skirt", "armourers:legs.leftLeg", "armourers:legs.rightLeg", "armourers:feet.leftFoot", "armourers:feet.rightFoot":
+				y--
+			}
+		}
+		c := PaintColor{R: data[4], G: data[5], B: data[6], PaintType: 255}
+		return CubeData{Pos: Vec3i{x, y, z}, Type: CubeType(data[7]), FaceColors: [6]PaintColor{c, c, c, c, c, c}}, nil
+	}
 	id, err := readByte(r)
 	if err != nil {
 		return CubeData{}, err
@@ -217,7 +258,16 @@ func readLegacyCube(r io.Reader, version int) (CubeData, error) {
 
 	cube := CubeData{
 		Pos:  Vec3i{int(int8(x)), int(int8(y)), int(int8(z))},
-		Type: CubeType(id & 0x0F),
+		Type: CubeType(id),
+	}
+	if version < 7 {
+		color, err := readInt32(r)
+		if err != nil {
+			return CubeData{}, err
+		}
+		c := PaintColor{R: byte(color >> 16), G: byte(color >> 8), B: byte(color), PaintType: 255}
+		cube.FaceColors = [6]PaintColor{c, c, c, c, c, c}
+		return cube, nil
 	}
 
 	for side := 0; side < 6; side++ {

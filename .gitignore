@@ -1,9 +1,14 @@
 # Build output
 *.exe
+*.exe~
+.build-cache/
 
-# Test output
+# Local models, fixtures and generated output
 *.bbmodel
 *.armour
+*.awsk
+outputs/
+testdata/
 
 # Go
 vendor/
@@ -20,3 +25,9 @@ Thumbs.db
 # Debug tools
 cmd/debug/
 cmd/texdump/
+
+# Downloaded research sources, benchmarks and local caches
+.research/
+cmd/research/
+__pycache__/
+*.pyc

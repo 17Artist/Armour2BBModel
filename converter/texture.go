@@ -24,6 +24,8 @@ type atlasRegion struct {
 	x, y   int
 	w, h   int
 	pixels [][]skin.PaintColor // [h][w] 已按 Blockbench UV 方向排列
+	mask   [][]bool
+	alpha  byte
 }
 
 func NewTextureAtlas() *TextureAtlas {
@@ -34,10 +36,10 @@ func NewTextureAtlas() *TextureAtlas {
 // awFace: AW 面方向索引。
 // 颜色数据会被重新排列为 Blockbench 期望的 UV 方向。
 //
-// Blockbench per-face UV 方向（从真实 bbmodel 文件分析）：
+// Blockbench per-face UV 方向（官方 CubeFace.UVToLocal）：
 //
-//	north(Z-): U=+X(左到右), V=-Y(上到下)
-//	south(Z+): U=-X(右到左), V=-Y(上到下)
+//	north(Z-): U=-X, V=-Y(上到下)
+//	south(Z+): U=+X, V=-Y(上到下)
 //	east(X+):  U=-Z(前到后), V=-Y(上到下)
 //	west(X-):  U=+Z(后到前), V=-Y(上到下)
 //	up(Y+):    U=+X(左到右), V=+Z(前到后)
@@ -78,15 +80,13 @@ func (a *TextureAtlas) AddFace(face MergedFace, awFace int) int {
 
 	case skin.FaceNorth:
 		// AW north -> BB north
-		// AW: u=+X, v=+Y; BB north: U=+X, V=-Y
-		// X 翻转: U 反转; Y 翻转 + V=-Y: 两次翻转抵消，V 不变
-		pixels = flipH(src, w, h)
+		// AW +X -> BB -X matches north U; AW +Y -> BB -Y matches V.
+		pixels = copyPixels(src, w, h)
 
 	case skin.FaceSouth:
 		// AW south -> BB south
-		// AW: u=+X, v=+Y; BB south: U=-X, V=-Y
-		// X 翻转 + U=-X: 两次翻转抵消，U 不变; Y 翻转 + V=-Y: 抵消，V 不变
-		pixels = copyPixels(src, w, h)
+		// South U is BB +X, opposite to AW +X; V matches.
+		pixels = flipH(src, w, h)
 
 	case skin.FaceWest:
 		// AW west -> BB east
@@ -102,7 +102,28 @@ func (a *TextureAtlas) AddFace(face MergedFace, awFace int) int {
 	}
 
 	idx := len(a.regions)
-	a.regions = append(a.regions, atlasRegion{w: w, h: h, pixels: pixels})
+	var mask [][]bool
+	if face.Mask != nil {
+		mask = make([][]bool, h)
+		for v := 0; v < h; v++ {
+			mask[v] = make([]bool, w)
+			for u := 0; u < w; u++ {
+				x, y := u, v
+				if awFace == skin.FaceDown || awFace == skin.FaceUp || awFace == skin.FaceSouth || awFace == skin.FaceWest {
+					x = w - 1 - u
+				}
+				if awFace == skin.FaceUp {
+					y = h - 1 - v
+				}
+				mask[v][u] = face.Mask[y][x]
+			}
+		}
+	}
+	alpha := face.Alpha
+	if alpha == 0 {
+		alpha = 255
+	}
+	a.regions = append(a.regions, atlasRegion{w: w, h: h, pixels: pixels, mask: mask, alpha: alpha})
 	return idx
 }
 
@@ -207,8 +228,11 @@ func (a *TextureAtlas) GenerateBase64PNG() (string, error) {
 	for _, r := range a.regions {
 		for v := 0; v < r.h && v < len(r.pixels); v++ {
 			for u := 0; u < r.w && u < len(r.pixels[v]); u++ {
+				if r.mask != nil && !r.mask[v][u] {
+					continue
+				}
 				c := r.pixels[v][u]
-				img.SetNRGBA(r.x+u, r.y+v, color.NRGBA{R: c.R, G: c.G, B: c.B, A: 255})
+				img.SetNRGBA(r.x+u, r.y+v, color.NRGBA{R: c.R, G: c.G, B: c.B, A: r.alpha})
 			}
 		}
 	}

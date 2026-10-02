@@ -18,7 +18,7 @@ func ComputeFaceCulling(cubes []skin.CubeData) []FaceVisibility {
 	result := make([]FaceVisibility, len(cubes))
 	for i := range result {
 		for f := 0; f < 6; f++ {
-			result[i].Visible[f] = true
+			result[i].Visible[f] = !cubes[i].FaceColors[f].IsEmpty()
 		}
 	}
 
@@ -40,7 +40,9 @@ func ComputeFaceCulling(cubes []skin.CubeData) []FaceVisibility {
 			if !exists {
 				continue
 			}
-			if !c.Type.IsGlass() && !cubes[ni].Type.IsGlass() {
+			// Linked glass shares a translucent surface; opaque faces remain
+			// visible through glass, while glass against opaque is hidden.
+			if !cubes[ni].Type.IsGlass() || c.Type.IsGlass() {
 				result[i].Visible[face] = false
 			}
 		}
