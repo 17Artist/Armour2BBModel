@@ -26,6 +26,9 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Server build failed' }
     go build -trimpath -o armour-convert.exe ./cmd/convert
     if ($LASTEXITCODE -ne 0) { throw 'CLI build failed' }
+    if ($IsWindows -and [string]$env:GOOS -in @('', 'windows')) {
+        & (Join-Path $projectRoot 'scripts/set-exe-icon.ps1') -LiteralPath (Join-Path $projectRoot 'armour2bbmodel.exe') -IconPath (Join-Path $projectRoot 'branding/armour2bbmodel.ico')
+    }
 } finally {
     $env:GOOS = $previousOS
     $env:GOARCH = $previousArch

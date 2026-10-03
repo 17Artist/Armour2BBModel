@@ -55,7 +55,7 @@
       state.worker=new Worker('converter-worker.js');
       state.worker.onmessage=receive;
       state.worker.onerror=event=>engineFailed(event.message || '转换线程启动失败');
-      state.bootTimer=setTimeout(()=>engineFailed('引擎加载超时，请检查网络并重试'),60000);
+      state.bootTimer=setTimeout(()=>engineFailed('引擎加载超时，请重新加载引擎'),60000);
     } catch(error) { engineFailed(error.message); }
   }
   function engineFailed(message) {
